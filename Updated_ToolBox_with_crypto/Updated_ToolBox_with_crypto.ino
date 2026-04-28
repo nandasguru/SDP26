@@ -28,35 +28,15 @@ BLECharacteristic *pCharacteristic = nullptr;
 bool bleDeviceConnected = false;
 String bleLastReceivedMessage = "";
 
-// Track encryption state (best-effort; some stacks don’t expose reliably)
+// Track encryption state
 volatile bool bleLinkEncrypted = false;
 
 // ============================================================
-// PIN DEFINITIONS (matches your wiring) :contentReference[oaicite:3]{index=3}
+// PIN DEFINITIONS
 // ============================================================
-#define SS_PIN_TOOLS  4   // Reader for tool tags
-#define SS_PIN_USERS  5   // Reader for user cards
-#define RST_PIN       17  // Shared RST
-
-// ============================================================
-// WEIGHT HOOK (simple placeholder)
-// ============================================================
-// TODO: Replace with HX711 / ADC implementation as needed.
-#define WEIGHT_ADC_PIN 34  // safe ADC pin on ESP32 (adjust to your PCB)
-int readWeightGrams() {
-  // TODO: calibrate conversion to grams
-  int raw = analogRead(WEIGHT_ADC_PIN);
-  // Simple placeholder: return raw as "units"
-  return raw;
-}
-bool weightMatchesExpected(const char* toolName, int w) {
-  // TODO: replace with real expected weights and tolerances
-  // Example placeholders:
-  if (strcmp(toolName, "Tool1") == 0) return true; // allow for now
-  if (strcmp(toolName, "Tool2") == 0) return true;
-  if (strcmp(toolName, "Tool3") == 0) return true;
-  return true;
-}
+#define SS_PIN_TOOLS  4
+#define SS_PIN_USERS  5
+#define RST_PIN       17
 
 // ============================================================
 // DISPLAY SETUP
@@ -92,7 +72,7 @@ User users[NUM_USERS] = {
 #define NUM_TOOLS 3
 struct Tool {
   const char* name;
-  uint8_t uid[4];     // still used as “which tool is this”
+  uint8_t uid[4];
   bool present;
   const char* checkedOutBy;
 };
@@ -112,7 +92,7 @@ int sessionToolsTouched[NUM_TOOLS];
 int sessionToolCount = 0;
 
 // ============================================================
-// NEW: DEBOUNCE + AUTO-LOGOUT TIMER
+// DEBOUNCE + AUTO-LOGOUT TIMER
 // ============================================================
 unsigned long lastUserScan = 0;
 #define USER_SCAN_DEBOUNCE_MS 1500
@@ -120,40 +100,52 @@ unsigned long sessionStartTime = 0;
 #define SESSION_TIMEOUT_MS 10000
 
 // ============================================================
-// RFID SECURITY (Option C: MAC + counter record)
-// Tags: MIFARE Classic 1K EV1: sector keys + CRYPTO1. :contentReference[oaicite:4]{index=4}
+// WEIGHT HOOK
 // ============================================================
-static const uint8_t RFID_RECORD_BLOCK  = 4; // Sector 1, Block 0
-static const uint8_t RFID_TRAILER_BLOCK = 7; // Sector 1 trailer
+#define WEIGHT_ADC_PIN 34
+int readWeightGrams() {
+  int raw = analogRead(WEIGHT_ADC_PIN);
+  return raw;
+}
+bool weightMatchesExpected(const char* toolName, int w) {
+  if (strcmp(toolName, "Tool1") == 0) return true;
+  if (strcmp(toolName, "Tool2") == 0) return true;
+  if (strcmp(toolName, "Tool3") == 0) return true;
+  return true;
+}
+
+// ============================================================
+// RFID SECURITY
+// ============================================================
+static const uint8_t RFID_RECORD_BLOCK  = 4;
+static const uint8_t RFID_TRAILER_BLOCK = 7;
 
 Preferences prefRfid;
 static const char* RFID_PREF_NS = "rfid-sec";
 
-// Persisted keys (generated once; refuse default FF..)
 uint8_t g_sectorKey6[6];
 uint8_t g_masterHmacKey[32];
 bool g_refuseDefaultKey = true;
 
 bool isAllFF(const uint8_t* buf, size_t len) {
-  for (size_t i=0;i<len;i++) if (buf[i] != 0xFF) return false;
+  for (size_t i = 0; i < len; i++) if (buf[i] != 0xFF) return false;
   return true;
 }
 bool isAll00(const uint8_t* buf, size_t len) {
-  for (size_t i=0;i<len;i++) if (buf[i] != 0x00) return false;
+  for (size_t i = 0; i < len; i++) if (buf[i] != 0x00) return false;
   return true;
 }
 void fillRandom(uint8_t* out, size_t len) {
-  size_t i=0;
+  size_t i = 0;
   while (i < len) {
     uint32_t r = esp_random();
-    for (int b=0;b<4 && i<len;b++,i++) out[i] = (uint8_t)((r>>(8*b)) & 0xFF);
+    for (int b = 0; b < 4 && i < len; b++, i++) out[i] = (uint8_t)((r >> (8 * b)) & 0xFF);
   }
 }
 
 bool rfidSecurityInitKeys() {
   prefRfid.begin(RFID_PREF_NS, false);
 
-  // Sector key
   size_t klen = prefRfid.getBytesLength("sectorKey6");
   if (klen == 6) {
     prefRfid.getBytes("sectorKey6", g_sectorKey6, 6);
@@ -162,7 +154,6 @@ bool rfidSecurityInitKeys() {
     prefRfid.putBytes("sectorKey6", g_sectorKey6, 6);
   }
 
-  // HMAC key
   size_t hlen = prefRfid.getBytesLength("hmacKey32");
   if (hlen == 32) {
     prefRfid.getBytes("hmacKey32", g_masterHmacKey, 32);
@@ -200,10 +191,7 @@ bool mifareAuthBlock(MFRC522 &reader, uint8_t blockAddr, const uint8_t key6[6], 
     useKeyB ? MFRC522::PICC_CMD_MF_AUTH_KEY_B : MFRC522::PICC_CMD_MF_AUTH_KEY_A,
     blockAddr, &key, &(reader.uid)
   );
-  if (status != MFRC522::STATUS_OK) {
-    return false;
-  }
-  return true;
+  return (status == MFRC522::STATUS_OK);
 }
 
 bool mifareRead16(MFRC522 &reader, uint8_t blockAddr, uint8_t out16[16]) {
@@ -222,7 +210,6 @@ bool mifareWrite16(MFRC522 &reader, uint8_t blockAddr, const uint8_t in16[16]) {
 
 void buildTrailerBlock(uint8_t out16[16], const uint8_t keyA6[6], const uint8_t keyB6[6]) {
   memcpy(&out16[0], keyA6, 6);
-  // Common default access bytes: FF 07 80 and GPB 69
   out16[6] = 0xFF;
   out16[7] = 0x07;
   out16[8] = 0x80;
@@ -242,20 +229,14 @@ void buildRecordBlock(uint8_t out16[16], const uint8_t tagId8[8], uint32_t count
   memcpy(&out16[12], mac4, 4);
 }
 
-// Provision current tag on TOOLS reader:
-// - write sector trailer keys to non-default key
-// - write record to block 4
 bool rfidProvisionCurrentToolTag(uint32_t initialCounter = 0) {
   if (g_refuseDefaultKey && isAllFF(g_sectorKey6, 6)) return false;
-
   if (!rfidTools.PICC_IsNewCardPresent()) return false;
   if (!rfidTools.PICC_ReadCardSerial()) return false;
 
-  uint8_t defaultFF[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+  uint8_t defaultFF[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
-  // auth trailer (new tags often default to FF..)
   if (!mifareAuthBlock(rfidTools, RFID_TRAILER_BLOCK, defaultFF, false)) {
-    // try current key if already provisioned
     if (!mifareAuthBlock(rfidTools, RFID_TRAILER_BLOCK, g_sectorKey6, false) &&
         !mifareAuthBlock(rfidTools, RFID_TRAILER_BLOCK, g_sectorKey6, true)) {
       Serial.println("[RFID] Provision: cannot auth trailer.");
@@ -264,7 +245,6 @@ bool rfidProvisionCurrentToolTag(uint32_t initialCounter = 0) {
     }
   }
 
-  // write trailer
   uint8_t trailer[16];
   buildTrailerBlock(trailer, g_sectorKey6, g_sectorKey6);
   if (!mifareWrite16(rfidTools, RFID_TRAILER_BLOCK, trailer)) {
@@ -273,7 +253,6 @@ bool rfidProvisionCurrentToolTag(uint32_t initialCounter = 0) {
     return false;
   }
 
-  // auth record block with new key
   if (!mifareAuthBlock(rfidTools, RFID_RECORD_BLOCK, g_sectorKey6, false) &&
       !mifareAuthBlock(rfidTools, RFID_RECORD_BLOCK, g_sectorKey6, true)) {
     Serial.println("[RFID] Provision: record auth failed.");
@@ -298,11 +277,9 @@ bool rfidProvisionCurrentToolTag(uint32_t initialCounter = 0) {
   return true;
 }
 
-// Authorize tag on a given reader (verify MAC, bump counter)
 bool rfidAuthorizeAndUpdate(MFRC522 &reader) {
   if (g_refuseDefaultKey && isAllFF(g_sectorKey6, 6)) return false;
 
-  // Reader.uid already populated by PICC_ReadCardSerial() in caller.
   if (!mifareAuthBlock(reader, RFID_RECORD_BLOCK, g_sectorKey6, false) &&
       !mifareAuthBlock(reader, RFID_RECORD_BLOCK, g_sectorKey6, true)) {
     return false;
@@ -327,7 +304,6 @@ bool rfidAuthorizeAndUpdate(MFRC522 &reader) {
   hmacTrunc4(g_masterHmacKey, tagId8, counter, macExpected);
   if (memcmp(macStored, macExpected, 4) != 0) return false;
 
-  // bump counter
   uint8_t updated[16];
   buildRecordBlock(updated, tagId8, counter + 1);
   if (!mifareWrite16(reader, RFID_RECORD_BLOCK, updated)) return false;
@@ -335,9 +311,8 @@ bool rfidAuthorizeAndUpdate(MFRC522 &reader) {
   return true;
 }
 
-// Hook used by your existing checkout flow
 bool authorizeTag(MFRC522::Uid* uid) {
-  (void)uid; // uid already in rfidTools.uid
+  (void)uid;
   return rfidAuthorizeAndUpdate(rfidTools);
 }
 
@@ -346,21 +321,19 @@ bool authorizeTag(MFRC522::Uid* uid) {
 // ============================================================
 class MySecurityCallbacks : public BLESecurityCallbacks {
   uint32_t onPassKeyRequest() override {
-    // Static passkey for demo; replace with per-boot random shown on OLED for stronger pairing UX.
     return 123456;
   }
   void onPassKeyNotify(uint32_t pass_key) override {
     Serial.print("[BLE] Passkey: "); Serial.println(pass_key);
-    // Optional: show on OLED
     display.clearDisplay();
-    display.setCursor(0,0);
+    display.setCursor(0, 0);
     display.println("BLE Passkey:");
     display.println(pass_key);
     display.display();
   }
   bool onConfirmPIN(uint32_t pass_key) override {
     Serial.print("[BLE] ConfirmPIN: "); Serial.println(pass_key);
-    return true; // DisplayOnly: user confirms on phone
+    return true;
   }
   bool onSecurityRequest() override {
     return true;
@@ -396,7 +369,6 @@ class MyBLEServerCallbacks: public BLEServerCallbacks {
 
 class MyBLECharacteristicCallbacks: public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic) override {
-    // Require encrypted link for writes (defense-in-depth)
     if (!bleLinkEncrypted) {
       Serial.println("[BLE] Reject write: link not encrypted.");
       return;
@@ -417,10 +389,9 @@ void BLE_init_secure() {
   Serial.println("[BLE] Initializing (secure)...");
   BLEDevice::init("SmartToolbox");
 
-  // Security configuration
   BLESecurity *pSecurity = new BLESecurity();
-  pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND); // secure connections + MITM + bonding
-  pSecurity->setCapability(ESP_IO_CAP_OUT); // device displays passkey
+  pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
+  pSecurity->setCapability(ESP_IO_CAP_OUT);
   pSecurity->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
   BLEDevice::setSecurityCallbacks(new MySecurityCallbacks());
 
@@ -437,9 +408,7 @@ void BLE_init_secure() {
     BLECharacteristic::PROPERTY_INDICATE
   );
 
-  // Require encryption at attribute level (stack-dependent; still useful)
   pCharacteristic->setAccessPermissions(ESP_GATT_PERM_READ_ENCRYPTED | ESP_GATT_PERM_WRITE_ENCRYPTED);
-
   pCharacteristic->setCallbacks(new MyBLECharacteristicCallbacks());
   pCharacteristic->addDescriptor(new BLE2902());
 
@@ -459,7 +428,6 @@ bool BLE_isConnected() { return bleDeviceConnected; }
 
 bool BLE_sendMessage(String message) {
   if (!bleDeviceConnected || pCharacteristic == nullptr) return false;
-  // Prefer only sending when encrypted for sensitive events
   if (!bleLinkEncrypted) {
     Serial.println("[BLE] Not sending: link not encrypted yet.");
     return false;
@@ -504,7 +472,6 @@ void BLE_sendReturn(const char* toolName) {
 }
 void BLE_sendFullInventory() {
   if (!BLE_isConnected()) return;
-
   String json = "{\"event\":\"inventory\",\"tools\":[";
   for (int i = 0; i < NUM_TOOLS; i++) {
     if (i > 0) json += ",";
@@ -553,7 +520,6 @@ void showDefaultScreen() {
   display.setCursor(0, 0);
   display.println("Smart Toolbox");
   display.println("================");
-
   for (int i = 0; i < NUM_TOOLS; i++) {
     display.print(tools[i].name);
     display.print(": ");
@@ -575,7 +541,6 @@ void showSessionScreen() {
   display.print("Checkout - ");
   display.println(currentUser->name);
   display.println("================");
-
   if (sessionToolCount == 0) {
     display.println("Scan tools...");
   } else {
@@ -688,8 +653,6 @@ void handleToolReader() {
   }
 
   bool isReturning = !tools[toolIndex].present;
-
-  // Optional weight check hook (can be disabled if not wired)
   int w = readWeightGrams();
 
   if (isReturning) {
@@ -725,11 +688,10 @@ void handleToolReader() {
       delay(2000);
       showDefaultScreen();
     } else {
-      // Weight check (if desired)
       if (!weightMatchesExpected(tools[toolIndex].name, w)) {
         Serial.println("CONFLICT,WEIGHT_MISMATCH");
         display.clearDisplay();
-        display.setCursor(0,0);
+        display.setCursor(0, 0);
         display.println("Conflict!");
         display.println("Weight mismatch");
         display.display();
@@ -781,7 +743,6 @@ void handleBLECommands() {
   Serial.print("[BLE] Processing command: ");
   Serial.println(message);
 
-  // Only process commands when encrypted
   if (!bleLinkEncrypted) {
     Serial.println("[BLE] Ignoring command (not encrypted).");
     return;
@@ -791,11 +752,9 @@ void handleBLECommands() {
     BLE_sendFullInventory();
   }
 
-  // Admin provisioning command (guarded by encrypted link)
-  // TODO: add stronger admin auth (app-layer signature / server approval)
   if (message.indexOf("provision_tool_tag") >= 0) {
     display.clearDisplay();
-    display.setCursor(0,0);
+    display.setCursor(0, 0);
     display.println("Provision mode");
     display.println("Tap tool fob");
     display.display();
@@ -808,7 +767,7 @@ void handleBLECommands() {
     }
 
     display.clearDisplay();
-    display.setCursor(0,0);
+    display.setCursor(0, 0);
     display.println(ok ? "Provision OK" : "Provision FAIL");
     display.display();
     delay(1500);
@@ -834,7 +793,6 @@ void setup() {
     Serial.println("OLED_READY");
   }
 
-  // Secure BLE
   BLE_init_secure();
 
   SPI.begin();
@@ -843,7 +801,6 @@ void setup() {
   rfidUsers.PCD_Init();
   delay(50);
 
-  // Security keys init
   if (!rfidSecurityInitKeys()) {
     Serial.println("[RFID] Security init failed; halting.");
     while (true) delay(1000);
